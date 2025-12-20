@@ -72,6 +72,46 @@ def generate_graph_from_ast(node):
 
 #     return features
 
+def extract_semantic_features(node):
+    """
+    分析 AST 節點中的語義特徵，用於安全分析。
+    """
+    features = {
+        "is_sensitive_call": False,
+        "is_input_source": False,
+        "has_string_concat": False,
+        "has_constant_str": False,
+    }
+
+    sensitive_apis = {'system', 'popen', 'call', 'run', 'eval', 'exec', 'cursor.execute'}
+    input_apis = {'input', 'argv', 'environ', 'request.form', 'request.args'}
+
+    for sub_node in ast.walk(node):
+        # 1. 檢測敏感 API 調用
+        if isinstance(sub_node, ast.Call):
+            func_name = ""
+            if isinstance(sub_node.func, ast.Name):
+                func_name = sub_node.func.id
+            elif isinstance(sub_node.func, ast.Attribute):
+                func_name = sub_node.func.attr
+            
+            if func_name in sensitive_apis:
+                features["is_sensitive_call"] = True
+            if func_name in input_apis:
+                features["is_input_source"] = True
+
+        # 2. 檢測字串拼接 (可能隱含注入風險)
+        if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.Add):
+            if isinstance(sub_node.left, (ast.Str, ast.JoinedStr)) or isinstance(sub_node.right, (ast.Str, ast.JoinedStr)):
+                features["has_string_concat"] = True
+        
+        # 3. 檢測字串常量 (可能是密碼、URL 或固定命令)
+        if isinstance(sub_node, (ast.Str, ast.Constant)):
+            if isinstance(sub_node, ast.Str) or (isinstance(sub_node, ast.Constant) and isinstance(sub_node.value, str)):
+                features["has_constant_str"] = True
+
+    return features
+
 def get_node_features(graph, node):
     """
     Extract features for a single CFG node.
@@ -90,6 +130,11 @@ def get_node_features(graph, node):
         "is_return",
         "is_break",
         "is_continue",
+        # 新增語義特徵
+        "is_sensitive_call",
+        "is_input_source",
+        "has_string_concat",
+        "has_constant_str",
     ]
     features = [int(bool(node_data.get(f, False))) for f in flags]
 
@@ -121,6 +166,7 @@ def get_node_features(graph, node):
     features.append(float(type_id))
 
     return features
+
 
 
 def adjacency_matrix_to_edge_index(adj_matrix):
@@ -195,17 +241,73 @@ def calculate_similarity(c1, c2):
 
 def extract_graph_from_pyg_data(pyg_data):
     """
-    Extract a NetworkX graph from a PyG Data object.
+    Extract a NetworkX DiGraph from a PyG Data object, preserving node features.
     """
     edge_index = pyg_data.edge_index
-    num_nodes = pyg_data.x.size(0)
+    x = pyg_data.x
+    num_nodes = x.size(0)
 
-    # Create a NetworkX graph
-    graph = nx.Graph()
-    graph.add_nodes_from(range(num_nodes))
-    graph.add_edges_from(edge_index.t().tolist())
+    # Create a NetworkX DiGraph (CFGs are directed)
+    graph = nx.DiGraph()
+    for i in range(num_nodes):
+        # Store features as a list
+        feat_list = x[i].tolist() if hasattr(x[i], 'tolist') else x[i]
+        graph.add_node(i, features=feat_list)
+
+    # Add edges
+    if edge_index.numel() > 0:
+        graph.add_edges_from(edge_index.t().tolist())
 
     return graph
+
+
+def describe_graph(graph, original_graph=None):
+    """
+    Generate a human-readable description of the CFG and its semantic features for the LLM.
+    If original_graph is provided, highlights significant feature changes (GNN optimizations).
+    """
+    feature_names = [
+        "contains_function", "contains_loop", "contains_if", "contains_comment",
+        "is_return", "is_break", "is_continue", "is_sensitive_call",
+        "is_input_source", "has_string_concat", "has_constant_str",
+        "in_degree", "out_degree", "type_id"
+    ]
+
+    description = []
+    description.append(f"CFG Structure: {len(graph.nodes)} nodes, {len(graph.edges)} edges.")
+    
+    for node in sorted(graph.nodes):
+        feats = graph.nodes[node].get('features', [])
+        if not feats:
+            continue
+            
+        node_desc = [f"Node {node}:"]
+        
+        # Add semantic flags that are 'active' (threshold > 0.5 for GNN outputs)
+        active_flags = []
+        for i in range(min(len(feats), 11)): # First 11 are binary-ish flags
+            if feats[i] > 0.5:
+                active_flags.append(feature_names[i])
+        
+        if active_flags:
+            node_desc.append(f"  Flags: {', '.join(active_flags)}")
+        
+        # Check for optimization shifts if original_graph is provided
+        if original_graph and node in original_graph.nodes:
+            orig_feats = original_graph.nodes[node].get('features', [])
+            if orig_feats:
+                shifts = []
+                for i in [7, 8, 9]: # Focus on security features: sensitive_call, input_source, string_concat
+                    if feats[i] > orig_feats[i] + 0.1:
+                        shifts.append(f"More attention to {feature_names[i]}")
+                    elif feats[i] < orig_feats[i] - 0.1:
+                        shifts.append(f"Less {feature_names[i]} risk")
+                if shifts:
+                    node_desc.append(f"  GNN Optimization Hints: {', '.join(shifts)}")
+        
+        description.append("\n".join(node_desc))
+    
+    return "\n".join(description)
 
 
 def load_original_code(file_path):
@@ -340,6 +442,7 @@ def build_cfg_from_ast(node, graph, prev_node=None):
     # Helper: add node with attributes
     def add_node_for(ast_node, node_id=None):
         nid = node_id if node_id is not None else new_id(type(ast_node).__name__)
+        semantic_attrs = extract_semantic_features(ast_node)
         attrs = {
             "ast_node": ast_node,
             "contains_function": isinstance(ast_node, ast.FunctionDef),
@@ -350,8 +453,10 @@ def build_cfg_from_ast(node, graph, prev_node=None):
             "is_break": isinstance(ast_node, ast.Break),
             "is_continue": isinstance(ast_node, ast.Continue),
         }
+        attrs.update(semantic_attrs)
         graph.add_node(nid, **attrs)
         return nid
+
 
     # If the node is a Module (top-level), iterate its body sequentially
     if isinstance(node, ast.Module):
