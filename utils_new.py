@@ -239,27 +239,131 @@ def build_cfg_from_ast(node, graph, prev_node=None):
     """
     Build a Control Flow Graph (CFG) from an AST node.
     """
-    if isinstance(node, ast.stmt):
-        current_node = str(node.lineno)
-        graph.add_node(current_node, ast_node=node)
+    if not hasattr(build_cfg_from_ast, "_counter"):
+        build_cfg_from_ast._counter = 0
 
-        if prev_node is not None:
-            graph.add_edge(prev_node, current_node)
+    def new_id(prefix=None):
+        i = build_cfg_from_ast._counter
+        build_cfg_from_ast._counter += 1
+        if prefix:
+            return f"{prefix}_{i}"
+        return f"N_{i}"
 
-        # Special handling for control structures
-        if isinstance(node, ast.If):
-            build_cfg_from_ast(node.body, graph, current_node)
-            build_cfg_from_ast(node.orelse, graph, current_node)
-            return
-        elif isinstance(node, (ast.For, ast.While)):
-            build_cfg_from_ast(node.body, graph, current_node)
-            return
+    def add_node_for(ast_node, node_id=None):
+        nid = node_id if node_id is not None else new_id(type(ast_node).__name__)
+        #semantic_attrs = extract_semantic_features(ast_node)
+        attrs = {
+                "ast_node": ast_node,
+                "contains_function": isinstance(ast_node, ast.FunctionDef),
+                "contains_loop": isinstance(ast_node, (ast.For, ast.While)),
+                "contains_if": isinstance(ast_node, ast.If),
+                "contains_comment": False,
+            }
+        #attrs.update(semantic_attrs)
+        graph.add_node(nid, **attrs)
+        return nid
 
-        prev_node = current_node
+    if isinstance(node, ast.Module):
+        last = prev_node
+        for child in node.body:
+            last = build_cfg_from_ast(child, graph, last)
+        return last
 
-    elif isinstance(node, list):
+    # If we got a list of statements, process sequentially
+    if isinstance(node, list):
+        last = prev_node
         for child in node:
-            prev_node = build_cfg_from_ast(child, graph, prev_node)
+            last_child = build_cfg_from_ast(child, graph, last)
+            # If child returned None (e.g., return), we stop sequence continuation
+            if last_child is None:
+                last = None
+            else:
+                last = last_child
+        return last
 
+
+    print("before node isinstance stmt")
+    # Only handle statements for CFG nodes
+    if isinstance(node, ast.stmt):
+        # prefer lineno for readability when present
+        print("node isinstance stmt")
+        if hasattr(node, "lineno"):
+            node_id = f"LN{getattr(node, 'lineno')}_{type(node).__name__}"
+        else:
+            node_id = new_id(type(node).__name__)
+
+        curr = add_node_for(node, node_id)
+
+        # connect from prev sequential node
+        if prev_node is not None:
+            try:
+                graph.add_edge(prev_node, curr)
+            except Exception:
+                pass
+
+        # handle statement kinds
+        # 1) If: create condition node (curr) -> body & orelse -> join
+        if isinstance(node, ast.If):
+            # body and orelse are lists
+            print("node isinstance If")
+            body_end = build_cfg_from_ast(node.body, graph, curr)
+            orelse_end = build_cfg_from_ast(node.orelse, graph, curr)
+
+            # create an explicit join node so subsequent statements have a single predecessor
+            join_id = new_id("JOIN")
+            graph.add_node(join_id, join=True)
+
+            # connect branch ends to join (if branch empty, connect condition directly)
+            if body_end is not None:
+                graph.add_edge(body_end, join_id)
+            else:
+                graph.add_edge(curr, join_id)
+
+            if orelse_end is not None:
+                graph.add_edge(orelse_end, join_id)
+            else:
+                graph.add_edge(curr, join_id)
+
+            return join_id
+
+        # 2) For / While: create loop header (curr), body, back-edge, and provide an after-loop node
+        elif isinstance(node, (ast.For, ast.While)):
+            print("node isinstance For/While")
+            # body: entry from curr
+            body_end = build_cfg_from_ast(node.body, graph, curr)
+
+            # add back-edge from body_end to header if body_end exists
+            if body_end is not None and body_end != curr:
+                graph.add_edge(body_end, curr)
+
+            # create a node representing the point after the loop (so subsequent statements connect here)
+            after_loop = new_id("AFTER_LOOP")
+            graph.add_node(after_loop, synthetic=True)
+            # header can go to after_loop (loop exit)
+            graph.add_edge(curr, after_loop)
+            return after_loop
+
+        # 3) FunctionDef: create function node; optionally build body as separate subgraph (not connected to caller flow)
+        elif isinstance(node, ast.FunctionDef): 
+            print("node isinstance FunctionDef")    
+            # create function node already as curr; build body but don't connect its exit to sequential flow
+            # we still add the body subgraph to allow intra-function CFG
+            _ = build_cfg_from_ast(node.body, graph, curr)
+            # function def acts as a single top-level statement for caller flow
+            return curr
+
+        else:
+            last = curr
+            for field in ("body", "orelse", "finalbody"):
+                if hasattr(node, field):
+                    sub = getattr(node, field)
+                    if sub:
+                        sub_end = build_cfg_from_ast(sub, graph, last)
+                        if sub_end is not None:
+                            last = sub_end
+            # return the last node as continuation point
+            return last
+
+    # Non-statement nodes: do not change prev_node
     return prev_node
 
