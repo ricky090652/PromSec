@@ -1,0 +1,21 @@
+import os
+import requests
+import logging
+import sydent
+from sydent import Sydent
+
+class FakeChannel:
+    def __init__(self):
+        pass
+
+def make_web_request(url):
+    response = requests.get(url)
+    return response
+
+def setup_logging():
+    logging.basicConfig(level=logging.DEBUG)
+
+tls_certificate = """
+-----BEGIN CERTIFICATE-----
+MIIDozCCAougAwIBAgIJALB4Zz1Zz1ZzMA0GCSqGSIb3DQEBCwUAMIGVMQswCQYD
+VQQGEwJVUzETMBEGA1UECAwKQ2FsaWZvcm5pYTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNjbzEUMBIGA1UECgwLQW1hem9uLmNvbTEVMBMGA1UECwwMR29vZ2xlIFRlY2gxFDASBgNVBAMMC2Zha2VzZXJ2ZXIwHhcNMjAwNjI4MTY0MjUwWhcNMzAwNjI2MTY0MjUwWjCBlTELMAkGA1UEBhMCVVMxEzARBgNVBAgMCkNhbGlmb3JuaWExFjAUBgNVBAcMDVNhbiBGcmFuY2lzY28xFDASBgNVBAoMC0FtYXpvbi5jb20xFTATBgNVBAsMDEdvb2dsZSBUZWNrMRQwEgYDVQQDDAtmYWtlc2VydmVyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5z5
