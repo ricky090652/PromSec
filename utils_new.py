@@ -10,6 +10,17 @@ from prettytable import PrettyTable
 import matplotlib.pyplot as plt
 
 
+AST_TYPES = [
+    "FunctionDef", "AsyncFunctionDef", "ClassDef", "Return", "Delete",
+    "Assign", "AugAssign", "AnnAssign", "For", "AsyncFor", "While", "If",
+    "With", "AsyncWith", "Raise", "Try", "Assert", "Import", "ImportFrom",
+    "Global", "Nonlocal", "Expr", "Pass", "Break", "Continue", "Call",
+    "Name", "Attribute", "Constant", "BinOp", "UnaryOp", "Lambda", "IfExp",
+    "Dict", "Set", "ListComp", "SetComp", "DictComp", "GeneratorExp",
+    "Await", "Yield", "YieldFrom", "Compare", "BoolOp", "Module"
+]
+
+
 def generate_graph_from_ast(node):
     """
     Generate a graph from an Abstract Syntax Tree (AST).
@@ -81,34 +92,84 @@ def extract_semantic_features(node):
         "is_input_source": False,
         "has_string_concat": False,
         "has_constant_str": False,
+        "is_sql_query": False,
+        "is_file_operation": False,
+        "is_network_call": False,
+        "is_crypto_operation": False,
+        "is_serialization": False,
+        "uses_format_string": False,
     }
 
-    sensitive_apis = {'system', 'popen', 'call', 'run', 'eval', 'exec', 'cursor.execute'}
-    input_apis = {'input', 'argv', 'environ', 'request.form', 'request.args'}
+    
+    sensitive_apis = {'system', 'popen', 'call', 'run', 'eval', 'exec'}
+    input_apis = {'input', 'argv', 'environ', 'form', 'args', 'get', 'getlist'}
+    sql_apis = {'execute', 'executemany', 'executescript', 'raw', 'rawSQL'}
+    file_apis = {'open', 'read', 'write', 'readlines', 'writelines', 'remove', 'unlink', 'rmdir', 'makedirs'}
+    network_apis = {'get', 'post', 'put', 'delete', 'request', 'urlopen', 'urlretrieve', 'socket', 'connect', 'send', 'recv'}
+    crypto_apis = {'md5', 'sha1', 'random', 'randint', 'choice', 'DES', 'Blowfish'}  # 弱加密
+    serialization_apis = {'load', 'loads', 'dump', 'dumps', 'pickle', 'unpickle', 'safe_load'}
 
     for sub_node in ast.walk(node):
-        # 1. 檢測敏感 API 調用
+        # function call
         if isinstance(sub_node, ast.Call):
             func_name = ""
+            full_name = ""  
+            
             if isinstance(sub_node.func, ast.Name):
                 func_name = sub_node.func.id
+                full_name = func_name
             elif isinstance(sub_node.func, ast.Attribute):
                 func_name = sub_node.func.attr
+                
+                if isinstance(sub_node.func.value, ast.Name):
+                    full_name = f"{sub_node.func.value.id}.{func_name}"
+                else:
+                    full_name = func_name
             
+            # 1. sensitive call
             if func_name in sensitive_apis:
                 features["is_sensitive_call"] = True
-            if func_name in input_apis:
+            
+            # 2. input source
+            if func_name in input_apis or 'request' in full_name.lower():
                 features["is_input_source"] = True
+            
+            # 3. sql query
+            if func_name in sql_apis or 'execute' in func_name.lower():
+                features["is_sql_query"] = True
+            
+            # 4. file operation
+            if func_name in file_apis:
+                features["is_file_operation"] = True
+            
+            # 5. network call
+            if func_name in network_apis or 'http' in full_name.lower() or 'requests' in full_name.lower():
+                features["is_network_call"] = True
+            
+            # 6. crypto operation
+            if func_name in crypto_apis or 'hashlib' in full_name.lower():
+                features["is_crypto_operation"] = True
+            
+            # 7. serialization/deserialization (pickle, yaml, json)
+            if func_name in serialization_apis or 'pickle' in full_name.lower() or 'yaml' in full_name.lower():
+                features["is_serialization"] = True
 
-        # 2. 檢測字串拼接 (可能隱含注入風險)
+        # string concat
         if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.Add):
             if isinstance(sub_node.left, (ast.Str, ast.JoinedStr)) or isinstance(sub_node.right, (ast.Str, ast.JoinedStr)):
                 features["has_string_concat"] = True
         
-        # 3. 檢測字串常量 (可能是密碼、URL 或固定命令)
+        # string constant
         if isinstance(sub_node, (ast.Str, ast.Constant)):
             if isinstance(sub_node, ast.Str) or (isinstance(sub_node, ast.Constant) and isinstance(sub_node.value, str)):
                 features["has_constant_str"] = True
+        
+        
+        if isinstance(sub_node, ast.JoinedStr):
+            features["uses_format_string"] = True
+        if isinstance(sub_node, ast.Call):
+            if isinstance(sub_node.func, ast.Attribute) and sub_node.func.attr == 'format':
+                features["uses_format_string"] = True
 
     return features
 
@@ -130,11 +191,18 @@ def get_node_features(graph, node):
         "is_return",
         "is_break",
         "is_continue",
-        # 新增語義特徵
+        
         "is_sensitive_call",
         "is_input_source",
         "has_string_concat",
         "has_constant_str",
+        
+        "is_sql_query",
+        "is_file_operation",
+        "is_network_call",
+        "is_crypto_operation",
+        "is_serialization",
+        "uses_format_string",
     ]
     features = [int(bool(node_data.get(f, False))) for f in flags]
 
@@ -155,15 +223,18 @@ def get_node_features(graph, node):
     features.append(float(in_deg))
     features.append(float(out_deg))
 
-    # small AST-type encoding (stable-ish, normalized to [0,1))
+    # One-Hot Encoding for AST node type (deterministic, no ordering)
     ast_node = node_data.get("ast_node", None)
-    if ast_node is not None:
-        ast_name = type(ast_node).__name__
-    else:
-        ast_name = "None"
-    # convert name -> reproducible small float (not one-hot, keeps vector short)
-    type_id = (abs(hash(ast_name)) % 1000) / 1000.0
-    features.append(float(type_id))
+    current_type = type(ast_node).__name__ if ast_node is not None else "None"
+    
+    # generate One-Hot vector
+    one_hot = [0] * len(AST_TYPES)
+    if current_type in AST_TYPES:
+        index = AST_TYPES.index(current_type)
+        one_hot[index] = 1
+    # 若類型不在列表內，全為 0 (表示 'Other' 或未知類型)
+    
+    features.extend(one_hot)  # One-Hot接在原本特徵後面
 
     return features
 
@@ -258,6 +329,8 @@ def extract_graph_from_pyg_data(pyg_data):
     if edge_index.numel() > 0:
         graph.add_edges_from(edge_index.t().tolist())
 
+    nx.draw(graph, with_labels=True)
+    plt.show()
     return graph
 
 
@@ -266,12 +339,16 @@ def describe_graph(graph, original_graph=None):
     Generate a human-readable description of the CFG and its semantic features for the LLM.
     If original_graph is provided, highlights significant feature changes (GNN optimizations).
     """
+    # 特徵名稱：前 19 個語義特徵 + 2 個結構特徵 + One-Hot (AST types)
     feature_names = [
         "contains_function", "contains_loop", "contains_if", "contains_comment",
-        "is_return", "is_break", "is_continue", "is_sensitive_call",
-        "is_input_source", "has_string_concat", "has_constant_str",
-        "in_degree", "out_degree", "type_id"
-    ]
+        "is_return", "is_break", "is_continue", 
+        "is_sensitive_call", "is_input_source", "has_string_concat", "has_constant_str",
+        
+        "is_sql_query", "is_file_operation", "is_network_call",
+        "is_crypto_operation", "is_serialization", "uses_format_string",
+        "in_degree", "out_degree"
+    ] + [f"type_{t}" for t in AST_TYPES]
 
     description = []
     description.append(f"CFG Structure: {len(graph.nodes)} nodes, {len(graph.edges)} edges.")
