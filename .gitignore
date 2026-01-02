@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 訓練產生的模型
+*.pt
+*.pth
+
+# 訓練結果資料夾
+Results_cfg_*/
+
+# 資料集
+Training_DS/
+Testing_DS/
+Testing1_DS/
+
+# 暫存檔案
+temp_code.py
+temp_*.py
+
+# IDE
+.vscode/
+.idea/
+
+# 其他
+*.log
+*.tmp

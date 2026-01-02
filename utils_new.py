@@ -310,28 +310,234 @@ def calculate_similarity(c1, c2):
     return matcher.ratio()
 
 
-def extract_graph_from_pyg_data(pyg_data):
+def extract_graph_from_pyg_data(pyg_data, show_plot=True):
     """
     Extract a NetworkX DiGraph from a PyG Data object, preserving node features.
+    If pyg_data has 'node_names' attribute, use those as node IDs instead of indices.
     """
     edge_index = pyg_data.edge_index
     x = pyg_data.x
     num_nodes = x.size(0)
 
+    # Check if we have original node names
+    has_names = hasattr(pyg_data, 'node_names') and pyg_data.node_names is not None
+    node_names = pyg_data.node_names if has_names else list(range(num_nodes))
+
     # Create a NetworkX DiGraph (CFGs are directed)
     graph = nx.DiGraph()
     for i in range(num_nodes):
-        # Store features as a list
+        node_id = node_names[i]
         feat_list = x[i].tolist() if hasattr(x[i], 'tolist') else x[i]
-        graph.add_node(i, features=feat_list)
+        graph.add_node(node_id, features=feat_list)
 
-    # Add edges
+    # Add edges using node names
     if edge_index.numel() > 0:
-        graph.add_edges_from(edge_index.t().tolist())
+        edges = edge_index.t().tolist()
+        for u_idx, v_idx in edges:
+            graph.add_edge(node_names[u_idx], node_names[v_idx])
 
-    nx.draw(graph, with_labels=True)
-    plt.show()
+    if show_plot:
+        nx.draw(graph, with_labels=True)
+        plt.show()
     return graph
+
+
+def cfg_to_pyg_data(cfg):
+    """
+    Convert a NetworkX CFG to PyG Data, preserving node names.
+    Returns a PyG Data object with 'node_names' attribute.
+    """
+    node_list = list(cfg.nodes())
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+    
+    # Extract features
+    x_list = []
+    for node in node_list:
+        feats = cfg.nodes[node].get('features', get_node_features(cfg, node))
+        x_list.append(feats)
+    
+    x = torch.tensor(x_list, dtype=torch.float)
+    
+    # Build edge index
+    edges = list(cfg.edges())
+    if edges:
+        edge_index = torch.tensor(
+            [[node_to_idx[u], node_to_idx[v]] for u, v in edges],
+            dtype=torch.long
+        ).t().contiguous()
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+    
+    from torch_geometric.data import Data
+    data = Data(x=x, edge_index=edge_index)
+    data.node_names = node_list  # Preserve original node names
+    return data
+
+
+def cfg_to_dot(G, include_features=True):
+    """
+    Convert a CFG (NetworkX DiGraph) to DOT format string.
+    LLMs like GPT-4 can understand DOT/GraphViz format well.
+    
+    Parameters:
+        G: NetworkX DiGraph (CFG)
+        include_features: If True, include active semantic features in node labels
+    
+    Returns:
+        str: DOT format representation of the CFG
+    """
+    feature_names = [
+        "contains_function", "contains_loop", "contains_if", "contains_comment",
+        "is_return", "is_break", "is_continue",
+        "is_sensitive_call", "is_input_source", "has_string_concat", "has_constant_str",
+        "is_sql_query", "is_file_operation", "is_network_call",
+        "is_crypto_operation", "is_serialization", "uses_format_string",
+        "in_degree", "out_degree"
+    ]
+    
+    lines = ["digraph CFG {"]
+    lines.append('    rankdir=TB;')
+    lines.append('    node [shape=box];')
+    
+    for node in G.nodes():
+        data = G.nodes[node]
+        label_parts = [str(node)]
+        
+        if include_features:
+            feats = data.get('features', [])
+            active_flags = []
+            # Check semantic flags (indices 0-16 are binary flags)
+            for i in range(min(len(feats), 17)):
+                if i < len(feature_names) and feats[i] > 0.5:
+                    active_flags.append(feature_names[i])
+            if active_flags:
+                label_parts.append(f"[{', '.join(active_flags)}]")
+        
+        label = '\\n'.join(label_parts)
+        lines.append(f'    "{node}" [label="{label}"];')
+    
+    for u, v in G.edges():
+        lines.append(f'    "{u}" -> "{v}";')
+    
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def cfg_to_json(G, include_features=True):
+    """
+    Convert a CFG (NetworkX DiGraph) to JSON format string.
+    Structured format that LLMs can parse easily.
+    
+    Parameters:
+        G: NetworkX DiGraph (CFG)
+        include_features: If True, include feature vectors in output
+    
+    Returns:
+        str: JSON representation of the CFG
+    """
+    feature_names = [
+        "contains_function", "contains_loop", "contains_if", "contains_comment",
+        "is_return", "is_break", "is_continue",
+        "is_sensitive_call", "is_input_source", "has_string_concat", "has_constant_str",
+        "is_sql_query", "is_file_operation", "is_network_call",
+        "is_crypto_operation", "is_serialization", "uses_format_string"
+    ]
+    
+    nodes_dict = {}
+    for node in G.nodes():
+        data = G.nodes[node]
+        feats = data.get('features', [])
+        
+        node_info = {"id": str(node)}
+        if include_features and feats:
+            # Convert to named dict for readability
+            active_flags = {}
+            for i, name in enumerate(feature_names):
+                if i < len(feats) and feats[i] > 0.5:
+                    active_flags[name] = True
+            if active_flags:
+                node_info["flags"] = active_flags
+            # Include degree info
+            if len(feats) > 17:
+                node_info["in_degree"] = feats[17]
+                node_info["out_degree"] = feats[18]
+        
+        nodes_dict[str(node)] = node_info
+    
+    edges_list = [[str(u), str(v)] for u, v in G.edges()]
+    
+    result = {
+        "num_nodes": len(G.nodes()),
+        "num_edges": len(G.edges()),
+        "nodes": nodes_dict,
+        "edges": edges_list
+    }
+    
+    return json.dumps(result, indent=2)
+
+
+def create_cfg_diff_prompt(original_code, original_cfg, updated_cfg, format="dot"):
+    """
+    Create a prompt for LLM to generate updated code based on CFG changes.
+    Instead of manually translating feature changes, directly show CFG structure to LLM.
+    
+    Parameters:
+        original_code: str, the original Python source code
+        original_cfg: NetworkX DiGraph, the original CFG
+        updated_cfg: NetworkX DiGraph, the GAN-optimized CFG
+        format: "dot" or "json" - which format to use for CFG representation
+    
+    Returns:
+        str: The prompt to send to LLM
+    """
+    if format == "dot":
+        original_repr = cfg_to_dot(original_cfg)
+        updated_repr = cfg_to_dot(updated_cfg)
+        format_name = "DOT/GraphViz"
+    else:
+        original_repr = cfg_to_json(original_cfg)
+        updated_repr = cfg_to_json(updated_cfg)
+        format_name = "JSON"
+    
+    prompt = f"""You are a security-focused Python code refactoring assistant.
+
+## Original Code:
+```python
+{original_code}
+```
+
+## Original Control Flow Graph ({format_name} format):
+```
+{original_repr}
+```
+
+## Updated Control Flow Graph (after security optimization):
+```
+{updated_repr}
+```
+
+## Task:
+Analyze the structural and semantic changes between the two CFGs, then generate updated Python code that:
+
+1. **Maintains original functionality** - The code should do the same thing
+2. **Reflects CFG structural changes** - If nodes were added/removed, reflect that in code structure
+3. **Addresses security improvements** - Focus on nodes where security flags changed:
+   - `is_sensitive_call`: dangerous function calls (eval, exec, system, etc.)
+   - `is_input_source`: user input handling
+   - `has_string_concat`: string concatenation (potential injection)
+   - `is_sql_query`: SQL operations
+   - `is_file_operation`: file I/O
+   - `is_serialization`: pickle/yaml operations
+
+## Security Transformation Guidelines:
+- If `is_sensitive_call` decreased: Replace dangerous calls with safer alternatives
+- If `is_input_source` handling improved: Add input validation/sanitization
+- If `has_string_concat` for queries reduced: Use parameterized queries instead
+- If `is_serialization` flags changed: Use safe deserialization methods
+
+Provide ONLY the updated Python code, properly formatted and ready to run.
+"""
+    return prompt
 
 
 def describe_graph(graph, original_graph=None):
