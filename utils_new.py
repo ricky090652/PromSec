@@ -203,6 +203,10 @@ def get_node_features(graph, node):
         "is_crypto_operation",
         "is_serialization",
         "uses_format_string",
+        # Bandit-based features (from static analysis)
+        "bandit_high_severity",
+        "bandit_medium_severity",
+        "bandit_low_severity",
     ]
     features = [int(bool(node_data.get(f, False))) for f in flags]
 
@@ -647,26 +651,104 @@ def VCS(generated_graph):
 def run_bandit(filename):
     """
     Run the Bandit static code analyzer on a Python file.
+    Returns a list of dictionaries, each representing a vulnerability.
+    Each issue contains: line_number, severity, confidence, issue_text, test_id, etc.
     """
-    command = f"bandit -f json {filename}"
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    return result.stdout
+    import sys
+    import os
+    
+    # Try to find bandit in the same directory as the Python executable
+    python_dir = os.path.dirname(sys.executable)
+    bandit_path = os.path.join(python_dir, 'bandit.exe') if os.name == 'nt' else os.path.join(python_dir, 'bandit')
+    
+    if not os.path.exists(bandit_path):
+        bandit_path = 'bandit'  # Fallback to PATH
+    
+    command = f'"{bandit_path}" -f json "{filename}"'
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if result.stdout.strip():
+            json_output = json.loads(result.stdout)
+            return json_output.get('results', [])
+        return []
+    except Exception as e:
+        print(f"Error running bandit: {e}")
+        return []
 
 
-def generate_cfg_from_code(file_path):
+def enrich_cfg_with_bandit(cfg, bandit_results):
+    """
+    Enrich CFG nodes with Bandit scan results.
+    Maps Bandit findings to CFG nodes based on line numbers.
+    
+    Parameters:
+        cfg: NetworkX DiGraph (CFG)
+        bandit_results: list of Bandit issue dicts from run_bandit()
+    """
+    from collections import defaultdict
+    
+    # Build line -> issues mapping
+    issues_by_line = defaultdict(list)
+    for issue in bandit_results:
+        line_no = issue.get('line_number')
+        if line_no:
+            issues_by_line[line_no].append(issue)
+    
+    # Enrich each node
+    for node_id in cfg.nodes:
+        node_data = cfg.nodes[node_id]
+        ast_node = node_data.get('ast_node')
+        
+        # Get line number from AST node
+        line_no = None
+        if ast_node and hasattr(ast_node, 'lineno'):
+            line_no = ast_node.lineno
+        
+        # Initialize bandit flags
+        node_data['bandit_high_severity'] = False
+        node_data['bandit_medium_severity'] = False
+        node_data['bandit_low_severity'] = False
+        node_data['bandit_issues'] = []  # Store full issue details
+        
+        if line_no and line_no in issues_by_line:
+            node_data['bandit_issues'] = issues_by_line[line_no]
+            for issue in issues_by_line[line_no]:
+                severity = issue.get('issue_severity', '').upper()
+                if severity == 'HIGH':
+                    node_data['bandit_high_severity'] = True
+                elif severity == 'MEDIUM':
+                    node_data['bandit_medium_severity'] = True
+                elif severity == 'LOW':
+                    node_data['bandit_low_severity'] = True
+
+
+def generate_cfg_from_code(file_path, run_bandit_scan=True):
     """
     Generate a Control Flow Graph (CFG) from a Python source file.
+    
+    Parameters:
+        file_path: path to the Python file
+        run_bandit_scan: if True, run Bandit and enrich nodes with vulnerability info
+    
+    Returns:
+        cfg: NetworkX DiGraph with enriched node features
     """
     with open(file_path, 'r') as f:
         code = f.read()
 
     # Parse the Python source code into an AST
     tree = ast.parse(code)
-    #print(ast.dump(tree, indent=4))
     
     # Start generating the CFG
     cfg = nx.DiGraph()
     build_cfg_from_ast(tree, cfg)
+    
+    # Run Bandit and enrich nodes with vulnerability information
+    if run_bandit_scan:
+        bandit_results = run_bandit(file_path)
+        if bandit_results:
+            enrich_cfg_with_bandit(cfg, bandit_results)
+            print(f"[Bandit] Found {len(bandit_results)} issues in {file_path}")
 
     return cfg
 
