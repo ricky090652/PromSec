@@ -314,7 +314,7 @@ def calculate_similarity(c1, c2):
     return matcher.ratio()
 
 
-def extract_graph_from_pyg_data(pyg_data, show_plot=True):
+def extract_graph_from_pyg_data(pyg_data, show_plot=False):
     """
     Extract a NetworkX DiGraph from a PyG Data object, preserving node features.
     If pyg_data has 'node_names' attribute, use those as node IDs instead of indices.
@@ -748,7 +748,7 @@ def generate_cfg_from_code(file_path, run_bandit_scan=True):
         bandit_results = run_bandit(file_path)
         if bandit_results:
             enrich_cfg_with_bandit(cfg, bandit_results)
-            print(f"[Bandit] Found {len(bandit_results)} issues in {file_path}")
+            #print(f"[Bandit] Found {len(bandit_results)} issues in {file_path}")
 
     return cfg
 
