@@ -5,9 +5,11 @@ __pycache__/
 .venv/
 venv/
 env/
+check.py
 
 # Jupyter
 .ipynb_checkpoints/
+test1.ipynb
 
 # 訓練產生的模型
 *.pt
